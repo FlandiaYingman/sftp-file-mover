@@ -1,7 +1,9 @@
 package tech.flandia_yingm
 
-import com.jcraft.jsch.ChannelSftp
-import com.jcraft.jsch.JSch
+import com.jcraft.jsch.*
+import mu.KotlinLogging
+import java.io.Closeable
+import java.io.File
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -9,20 +11,30 @@ import java.nio.file.Paths
 import java.util.*
 import java.util.concurrent.TimeUnit.SECONDS
 
-class SftpClient(
-    address: InetSocketAddress,
+
+class SftpClient
+@Throws(JSchException::class)
+constructor(
+    private val address: InetSocketAddress,
     username: String,
     password: String
-) {
+) : Closeable {
 
-    private val channel: ChannelSftp;
+    private val log = KotlinLogging.logger {}
+
+    private val session: Session
+
+    private val channel: ChannelSftp
 
     init {
+        log.info("Open a new SFTP client with the address $address")
+
         val jsch = JSch()
-        val session = jsch.getSession(username, address.hostString, address.port)
         val config = Properties()
         config["StrictHostKeyChecking"] = "no"
         config["PreferredAuthentications"] = "password"
+
+        session = jsch.getSession(username, address.hostString, address.port)
         session.setConfig(config)
         session.setPassword(password)
         session.connect(SECONDS.toMillis(60).toInt())
@@ -30,26 +42,92 @@ class SftpClient(
         channel.connect(SECONDS.toMillis(60).toInt())
     }
 
-    fun download(remoteFile: String, localDir: String) {
-        val localFile = getFilename(remoteFile)
-        channel.get(remoteFile, "$localDir/$localFile")
+    @Synchronized
+    @Throws(SftpException::class, IOException::class)
+    fun upload(localFile: String, remoteDir: String) {
+        log.info { "Upload the local file '$localFile' to the remote dir '$remoteDir'" }
 
-        val remoteFileSize = channel.lstat(remoteFile).size
+        mkdirs(remoteDir)
+
+        val remoteFile = "$remoteDir/${SftpUtils.getFilename(localFile)}"
+        channel.put(localFile, remoteFile)
+
+        val localFileSize = Files.size(Paths.get(localFile))
+        val remoteFileSize = channel.stat(remoteFile).size
+        if (localFileSize != remoteFileSize) {
+            throw IOException("The local file size $localFileSize != the remote file size $remoteFileSize")
+        }
+    }
+
+    @Synchronized
+    @Throws(SftpException::class, IOException::class)
+    fun download(remoteFile: String, localDir: String) {
+        log.info { "Download the remote file '$remoteFile' to the local dir '$localDir'" }
+
+        File(localDir).mkdirs()
+
+        val localFile = "$localDir/${SftpUtils.getFilename(remoteFile)}"
+        channel.get(remoteFile, localFile)
+
+        val remoteFileSize = channel.stat(remoteFile).size
         val localFileSize = Files.size(Paths.get(localFile))
         if (remoteFileSize != localFileSize) {
             throw IOException("The remote file size $remoteFileSize != the local file size $localFileSize")
         }
     }
 
+    @Synchronized
+    @Throws(SftpException::class)
     fun remove(remoteFile: String) {
-        channel.rm(remoteFile)
+        log.info { "Remove the remote file '$remoteFile'" }
+        if (exists(remoteFile)) {
+            channel.rm(remoteFile)
+        }
     }
 
+    @Synchronized
+    @Throws(SftpException::class)
     fun list(remoteDir: String): List<String> {
-        return channel.ls(remoteDir).map {
-            val lsEntry = it as ChannelSftp.LsEntry
-            lsEntry.longname
+        log.info { "List all files in the remote dir '$remoteDir'" }
+        return channel.ls(remoteDir).map { "$remoteDir/${(it as ChannelSftp.LsEntry).filename}" }
+    }
+
+    @Synchronized
+    @Throws(SftpException::class)
+    fun exists(remotePath: String): Boolean {
+        return try {
+            channel.stat(remotePath)
+            true
+        } catch (e: SftpException) {
+            false
         }
+    }
+
+    @Synchronized
+    @Throws(SftpException::class)
+    private fun mkdirs(remoteDir: String) {
+        val root = SftpUtils.getRoot(remoteDir)
+        val rest = remoteDir.substring(root.length)
+
+        if (!exists(remoteDir)) {
+            channel.mkdir(root)
+        }
+        if (rest != "/" && rest != "") {
+            mkdirs(rest)
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        log.info { "Closing the SFTP client $this" }
+
+        channel.disconnect()
+        session.disconnect()
+    }
+
+    @Synchronized
+    override fun toString(): String {
+        return "SftpClient(address=$address)"
     }
 
 }

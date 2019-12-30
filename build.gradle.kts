@@ -18,7 +18,8 @@ dependencies {
     testCompile("org.junit.jupiter:junit-jupiter-api:5.6.0-M1")
     testCompile("org.junit.jupiter:junit-jupiter-engine:5.6.0-M1")
 
-
+    implementation("org.slf4j:slf4j-simple:1.7.30")
+    implementation("io.github.microutils:kotlin-logging:1.7.7")
 }
 
 tasks.withType<Test> {
