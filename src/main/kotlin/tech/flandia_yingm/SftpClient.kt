@@ -27,7 +27,7 @@ constructor(
     private val channel: ChannelSftp
 
     init {
-        log.info("Open a new SFTP client with the address $address")
+        log.info("Opening a new SFTP client with the address $address")
 
         val jsch = JSch()
         val config = Properties()
@@ -37,9 +37,13 @@ constructor(
         session = jsch.getSession(username, address.hostString, address.port)
         session.setConfig(config)
         session.setPassword(password)
-        session.connect(SECONDS.toMillis(60).toInt())
+        session.serverAliveInterval = SECONDS.toMillis(3).toInt()
+        session.timeout = SECONDS.toMillis(15).toInt()
+        session.connect(SECONDS.toMillis(15).toInt())
         channel = session.openChannel("sftp") as ChannelSftp
-        channel.connect(SECONDS.toMillis(60).toInt())
+        channel.connect(SECONDS.toMillis(15).toInt())
+
+        log.info("Opened a new SFTP client with the address $address")
     }
 
     @Synchronized
@@ -89,7 +93,7 @@ constructor(
     @Throws(SftpException::class)
     fun list(remoteDir: String): List<String> {
         log.info { "List all files in the remote dir '$remoteDir'" }
-        return channel.ls(remoteDir).map { "$remoteDir/${(it as ChannelSftp.LsEntry).filename}" }
+        return lsRec(remoteDir)
     }
 
     @Synchronized
@@ -115,6 +119,30 @@ constructor(
         if (rest != "/" && rest != "") {
             mkdirs(rest)
         }
+    }
+
+    private fun lsRec(remoteDir: String): List<String> {
+        return channel.ls(remoteDir)
+            .map { it as ChannelSftp.LsEntry }
+            .flatMap {
+                val file = "$remoteDir/${it.filename}"
+                log.info { "Searching $file" }
+                try {
+                    val fileAttr = it.attrs
+                    if (!file.endsWith(".")) {
+                        when {
+                            fileAttr.isDir -> lsRec(file)
+                            fileAttr.isReg -> listOf(file)
+                            else -> listOf<String>()
+                        }
+                    } else {
+                        listOf<String>()
+                    }
+                } catch (e: SftpException) {
+                    log.warn { "An SFTP error occurs while searching $file: $e" }
+                    listOf<String>()
+                }
+            }
     }
 
     @Synchronized
